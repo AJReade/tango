@@ -401,6 +401,29 @@ window.addEventListener("message", async (event) => {
 });
 ```
 
+### Providers that cut the popup off
+
+Some providers' sign-in pages send `Cross-Origin-Opener-Policy: same-origin`
+(Close does). The browser then puts the popup in its own browsing context
+group: the page that opened it sees `popup.closed === true` while the popup is
+still in use, and the callback page sees `window.opener === null`, so
+`postMessage` has nowhere to go.
+
+When the completion origin is the callback page's own origin, the callback page
+also sends its message on a `BroadcastChannel` named
+`tango_oauth:<intent_reference>`. The server decides this from the session's
+redirect URI and completion origin; the page never reads its own location. The
+`TangoOAuth` hook opens that channel when the popup opens and applies the same
+origin and intent checks as for `postMessage`. Only pages of that origin can
+use the channel, and only the page that started the sign-in knows its name:
+the intent reference is random and never appears in a URL. When the origins
+differ, nothing is broadcast and completion depends on `window.opener` as
+before.
+
+A popup that reads as closed resets the button, but the intent stays pending,
+so a completion that arrives on the channel afterwards is still accepted. The
+next connect replaces it.
+
 ## Token retention policy
 
 - Tango stores access and refresh tokens only in encrypted columns (AES-GCM). A candidate in `tango_authorizations` lives at most ten minutes and its handle is stored only as a SHA-256 hash.

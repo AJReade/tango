@@ -200,7 +200,10 @@ defmodule Tango.Live.OAuthComponent do
       })
     end
 
-    {:noreply, finish(socket)}
+    # A provider's Cross-Origin-Opener-Policy makes a popup still in use read as closed. The
+    # button resets, but the intent stays pending so a completion that arrives on the sign-in's
+    # BroadcastChannel is still accepted. The next connect replaces it.
+    {:noreply, assign(socket, :connecting, false)}
   end
 
   defp session_options(assigns, intent_reference) do

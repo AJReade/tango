@@ -56,6 +56,39 @@ defmodule Tango.Live.OAuthHookTest do
     end
   end
 
+  describe "a popup cut off by the provider's opener policy" do
+    test "accepts the completion on the sign-in's channel after the popup reads as closed", %{
+      scenarios: scenarios
+    } do
+      assert scenarios["channel_names"] == ["tango_oauth:intent-1"]
+
+      assert scenarios["channel_complete"] == [
+               %{"event" => "popup_closed", "payload" => %{}},
+               %{
+                 "event" => "oauth_complete",
+                 "payload" => %{
+                   "completion_handle" => "opaque-handle",
+                   "intent_reference" => "intent-1"
+                 }
+               }
+             ]
+    end
+
+    test "ignores channel messages from other origins, intents, and channels", %{
+      scenarios: scenarios
+    } do
+      closed_only = [%{"event" => "popup_closed", "payload" => %{}}]
+
+      assert scenarios["channel_wrong_origin"] == closed_only
+      assert scenarios["channel_wrong_intent"] == closed_only
+      assert scenarios["channel_other_name"] == closed_only
+    end
+
+    test "closes the channel once the sign-in completes", %{scenarios: scenarios} do
+      assert [%{"event" => "oauth_complete"}] = scenarios["channel_once"]
+    end
+  end
+
   describe "source contract" do
     test "hook never reads or forwards credentials or connection payloads" do
       source = File.read!(@hook_path)

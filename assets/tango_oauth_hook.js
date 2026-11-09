@@ -6,6 +6,9 @@
  * - Listens for postMessage from the OAuth callback page
  * - Accepts only messages from the popup window, from the callback page's
  *   origin, for the intent the server started
+ * - Also listens on a BroadcastChannel named after the sign-in's intent
+ *   reference, for providers whose Cross-Origin-Opener-Policy cuts the popup
+ *   off from this page (window.opener is null on the callback page)
  * - Forwards the opaque completion handle (never a token) back to the
  *   LiveComponent, which hands it to the authenticated server-side completion
  * - Monitors popup close state
@@ -19,6 +22,7 @@ const TangoOAuth = {
     this.popup = null
     this.pending = null
     this.pollInterval = null
+    this.channel = null
     this.componentId = this.el.dataset.componentId
 
     this.messageHandler = (event) => {
@@ -26,28 +30,16 @@ const TangoOAuth = {
       if (event.source !== this.popup) return
       if (event.origin !== this.pending.callbackOrigin) return
 
-      const data = event.data
-      if (!data || typeof data !== "object") return
-      if (data.intent_reference !== this.pending.intentReference) return
+      this.forwardCompletion(event.data)
+    }
 
-      const target = `#${this.componentId}`
-      const intentReference = this.pending.intentReference
+    // No source window to check here: the opener policy removed it. Only a page of the
+    // callback's origin that knows this sign-in's random intent reference can send on it.
+    this.channelHandler = (event) => {
+      if (!this.pending) return
+      if (event.origin !== this.pending.callbackOrigin) return
 
-      if (data.type === "oauth_complete") {
-        if (typeof data.completion_handle !== "string" || data.completion_handle === "") return
-
-        this.pushEventTo(target, "oauth_complete", {
-          completion_handle: data.completion_handle,
-          intent_reference: intentReference
-        })
-        this.cleanup()
-      } else if (data.type === "oauth_error") {
-        this.pushEventTo(target, "oauth_error", {
-          error: typeof data.error === "string" ? data.error : "oauth_failed",
-          intent_reference: intentReference
-        })
-        this.cleanup()
-      }
+      this.forwardCompletion(event.data)
     }
 
     window.addEventListener("message", this.messageHandler)
@@ -58,9 +50,16 @@ const TangoOAuth = {
       const left = window.screenX + (window.outerWidth - width) / 2
       const top = window.screenY + (window.outerHeight - height) / 2
 
+      this.closeChannel()
+
       this.pending = {
         intentReference: intent_reference,
         callbackOrigin: callback_origin
+      }
+
+      if ("BroadcastChannel" in window) {
+        this.channel = new BroadcastChannel(`tango_oauth:${intent_reference}`)
+        this.channel.onmessage = this.channelHandler
       }
 
       this.popup = window.open(
@@ -74,24 +73,65 @@ const TangoOAuth = {
         this.startPolling()
       } else {
         this.pending = null
+        this.closeChannel()
       }
     })
+  },
+
+  forwardCompletion(data) {
+    if (!data || typeof data !== "object") return
+    if (data.intent_reference !== this.pending.intentReference) return
+
+    const target = `#${this.componentId}`
+    const intentReference = this.pending.intentReference
+
+    if (data.type === "oauth_complete") {
+      if (typeof data.completion_handle !== "string" || data.completion_handle === "") return
+
+      this.pushEventTo(target, "oauth_complete", {
+        completion_handle: data.completion_handle,
+        intent_reference: intentReference
+      })
+      this.cleanup()
+    } else if (data.type === "oauth_error") {
+      this.pushEventTo(target, "oauth_error", {
+        error: typeof data.error === "string" ? data.error : "oauth_failed",
+        intent_reference: intentReference
+      })
+      this.cleanup()
+    }
   },
 
   startPolling() {
     this.pollInterval = setInterval(() => {
       if (this.popup && this.popup.closed) {
+        // Closed by the person, or cut off by the provider's opener policy: the two look the
+        // same from here. Keep listening on the channel until this sign-in completes or a new
+        // one starts.
         this.pushEventTo(`#${this.componentId}`, "popup_closed", {})
-        this.cleanup()
+        this.stopPolling()
+        this.popup = null
       }
     }, 1000)
   },
 
-  cleanup() {
+  stopPolling() {
     if (this.pollInterval) {
       clearInterval(this.pollInterval)
       this.pollInterval = null
     }
+  },
+
+  closeChannel() {
+    if (this.channel) {
+      this.channel.close()
+      this.channel = null
+    }
+  },
+
+  cleanup() {
+    this.stopPolling()
+    this.closeChannel()
     if (this.popup && !this.popup.closed) {
       this.popup.close()
     }

@@ -910,7 +910,11 @@ defmodule Tango.Auth do
   """
   defdelegate parse_scopes(scopes), to: Tango.Validation
 
-  @type callback_result :: %{payload: map() | nil, origin: String.t() | nil}
+  @type callback_result :: %{
+          payload: map() | nil,
+          origin: String.t() | nil,
+          broadcast: boolean()
+        }
 
   @doc """
   Completes a popup OAuth callback by staging the authorization code.
@@ -934,11 +938,11 @@ defmodule Tango.Auth do
 
     case Tango.Authorization.callback_context(state) do
       {:ok, context} -> popup_result(context, state, error, binary_param(params["code"]))
-      {:error, _reason} -> %{payload: nil, origin: nil}
+      {:error, _reason} -> %{payload: nil, origin: nil, broadcast: false}
     end
   end
 
-  def process_popup_callback(_params), do: %{payload: nil, origin: nil}
+  def process_popup_callback(_params), do: %{payload: nil, origin: nil, broadcast: false}
 
   defp popup_result(context, _state, error, _code) when is_binary(error),
     do: popup_failure(context, map_oauth_error_code(error))
@@ -953,6 +957,7 @@ defmodule Tango.Auth do
       {:ok, completion} ->
         %{
           origin: context.completion_origin,
+          broadcast: same_origin_as_callback?(context),
           payload: %{
             type: "oauth_complete",
             completion_handle: completion.completion_handle,
@@ -968,6 +973,7 @@ defmodule Tango.Auth do
   defp popup_failure(context, reason) do
     %{
       origin: context.completion_origin,
+      broadcast: same_origin_as_callback?(context),
       payload: %{
         type: "oauth_error",
         error: callback_error_category(reason),
@@ -975,6 +981,12 @@ defmodule Tango.Auth do
       }
     }
   end
+
+  # The callback page is served at the session's redirect URI. When the page that opened the
+  # popup has the same origin, the callback page can also reach it on a BroadcastChannel,
+  # which a provider's Cross-Origin-Opener-Policy cannot cut off.
+  defp same_origin_as_callback?(context),
+    do: Tango.Validation.origin(context.redirect_uri) == context.completion_origin
 
   @stable_callback_categories [:invalid_session, :client_changed, :invalid_authorization_code]
 
@@ -1144,10 +1156,20 @@ defmodule Tango.Auth do
   The page posts the payload to the session's exact completion origin and never
   falls back to a wildcard target. Payload and origin are encoded with
   `script_json/1` so they cannot break out of the script element.
+
+  A provider whose pages send `Cross-Origin-Opener-Policy: same-origin` cuts the
+  popup off from the page that opened it, so `window.opener` is `null` here. When
+  `broadcast` is true (the completion origin is this page's own origin), the page
+  also sends the payload on a `BroadcastChannel` named after the intent reference,
+  which only that origin's pages can open, and only the page that started this
+  sign-in knows the name of.
   """
   @spec generate_callback_html(callback_result()) :: String.t()
-  def generate_callback_html(%{payload: payload, origin: origin}) do
-    {status, payload_json, origin_json} = callback_page_values(payload, origin)
+  def generate_callback_html(%{payload: payload, origin: origin} = result) do
+    broadcast = Map.get(result, :broadcast, false)
+
+    {status, payload_json, origin_json, broadcast_json} =
+      callback_page_values(payload, origin, broadcast)
 
     """
     <!DOCTYPE html>
@@ -1164,9 +1186,17 @@ defmodule Tango.Auth do
         (function() {
           const payload = #{payload_json};
           const completionOrigin = #{origin_json};
+          const broadcast = #{broadcast_json};
 
-          if (payload && completionOrigin && window.opener) {
-            window.opener.postMessage(payload, completionOrigin);
+          if (payload && completionOrigin) {
+            if (window.opener) window.opener.postMessage(payload, completionOrigin);
+
+            if (broadcast && "BroadcastChannel" in window) {
+              const channel = new BroadcastChannel("tango_oauth:" + payload.intent_reference);
+              channel.postMessage(payload);
+              channel.close();
+            }
+
             window.close();
           }
         })();
@@ -1176,12 +1206,14 @@ defmodule Tango.Auth do
     """
   end
 
-  defp callback_page_values(%{type: type} = payload, origin)
+  defp callback_page_values(%{type: type} = payload, origin, broadcast)
        when type in ["oauth_complete", "oauth_error"] and is_binary(origin),
-       do: {status_text(type), script_json(payload), script_json(origin)}
+       do: {status_text(type), script_json(payload), script_json(origin), script_json(broadcast == true)}
 
-  defp callback_page_values(_payload, _origin),
-    do: {"This OAuth callback could not be completed. You can close this window.", "null", "null"}
+  defp callback_page_values(_payload, _origin, _broadcast),
+    do:
+      {"This OAuth callback could not be completed. You can close this window.", "null", "null",
+       "false"}
 
   defp status_text("oauth_complete"), do: "OAuth flow completed. You can close this window."
   defp status_text("oauth_error"), do: "OAuth flow failed. You can close this window."

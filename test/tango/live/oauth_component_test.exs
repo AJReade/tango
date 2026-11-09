@@ -144,6 +144,27 @@ defmodule Tango.Live.OAuthComponentTest do
       assert_received {"oauth_connected", %{completion_handle: "opaque-handle"}}
     end
 
+    test "a popup that reads as closed keeps the sign-in pending for a late completion", ctx do
+      {:ok, socket} = mount_component(ctx)
+      {:noreply, socket} = OAuthComponent.handle_event("connect", %{}, socket)
+      intent = socket.assigns.pending_intent
+
+      # A provider's Cross-Origin-Opener-Policy makes a popup still in use read as closed
+      {:noreply, socket} = OAuthComponent.handle_event("popup_closed", %{}, socket)
+
+      refute socket.assigns.connecting
+      assert socket.assigns.pending_intent == intent
+
+      {:noreply, _socket} =
+        OAuthComponent.handle_event(
+          "oauth_complete",
+          %{"completion_handle" => "opaque-handle", "intent_reference" => intent},
+          socket
+        )
+
+      assert_received {"oauth_connected", %{completion_handle: "opaque-handle"}}
+    end
+
     test "ignores a completion when no connect is pending", ctx do
       {:ok, socket} = mount_component(ctx)
 

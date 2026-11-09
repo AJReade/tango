@@ -130,6 +130,28 @@ defmodule Tango.AuthorizationCallbackTest do
                )
     end
 
+    test "a callback on the completion origin also sends the result on the sign-in's channel",
+         ctx do
+      session = authorization_session(ctx, "intent-1", redirect_uri: "#{@origin}/api/oauth/callback")
+      expect_token(ctx.bypass)
+
+      html = callback(code: @code, state: encoded_state(session)).resp_body
+
+      assert html =~ "const broadcast = true;"
+      assert html =~ ~s|new BroadcastChannel("tango_oauth:" + payload.intent_reference)|
+      assert html =~ "window.opener.postMessage(payload, completionOrigin)"
+      refute html =~ "location.origin"
+    end
+
+    test "a callback on another origin than the completion origin never broadcasts", ctx do
+      session = authorization_session(ctx)
+      expect_token(ctx.bypass)
+
+      html = callback(code: @code, state: encoded_state(session)).resp_body
+
+      assert html =~ "const broadcast = false;"
+    end
+
     test "provider token failure reports a stable category without the response body", ctx do
       session = authorization_session(ctx)
       expect_oauth_denial(ctx.bypass)
